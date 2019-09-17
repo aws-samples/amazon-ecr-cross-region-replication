@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "ECR repository cross-region replication"
+Parameters:
+  TargetRegions:
+    Description: Target regions to replicate, comma seperated
+    Type: CommaDelimitedList
+
+Resources:
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+        - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+      Path: "/"
+      Policies: 
+        - PolicyName: "CodeBuildLogsPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: "Allow"
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:CreateRepository
+                Resource: "*"
+  CWEventInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: events.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      Policies: 
+        - PolicyName: "CWEventInvokeCodeBuild"
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: "Allow"
+                Action: ["codebuild:StartBuild"]
+                Resource: "*"
+  CodeBuildECRReplicate:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:2.0
+        Type: LINUX_CONTAINER
+        PrivilegedMode: true
+      ServiceRole: !Ref CodeBuildRole
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub 
+          - |
+            version: 0.2
+            phases:
+              install:
+                runtime-versions:
+                  docker: 18
+              build:
+                commands: 
+                  - |
+                    check_create_repo()
+                    {
+                      dstRegion=$1
+                      repoName=$2
+                      #check repository in destation registry
+                      if ! repoMsg=$(aws ecr describe-repositories --repository-names $repoName --region $dstRegion 2>&1); then
+                        echo -n "$repoName does not exists in ECR@$dstRegion, creating... "
+                        aws ecr create-repository --repository-name $repoName --region $dstRegion > /dev/null
+                        echo "done."
+                      fi
+                    }
+                    echo "login source registry"
+                    $(aws ecr get-login --no-include-email --region $ECR_SRC_REGION)
+                    srcImage="$ECR_SRC_REG_ID.dkr.ecr.$ECR_SRC_REGION.${AWS::URLSuffix}/$ECR_REPO_NAME:$ECR_REPO_TAG"
+                    echo "pull image"
+                    docker pull $srcImage
+                    targetRegions=${ECR_TARGET_REGIONS}
+                    IFS=","; for reg in $targetRegions; do
+                      check_create_repo $reg $ECR_REPO_NAME
+                      targetImage="$ECR_SRC_REG_ID.dkr.ecr.$reg.${AWS::URLSuffix}/$ECR_REPO_NAME:$ECR_REPO_TAG"
+                      docker tag $srcImage $targetImage
+                      echo "login target registry in $reg"
+                      aws ecr get-login --no-include-email --region $reg | bash
+                      echo "push image to target region $reg"
+                      docker push $targetImage
+                    done
+          - {
+              ECR_TARGET_REGIONS: !Join [",", !Ref TargetRegions]
+            }
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "ECR PutImage event rule to trigger CodeBuild to replicate repository"
+      EventPattern: 
+        source: [aws.ecr]
+        detail:
+          eventName: [PutImage]
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CodeBuildECRReplicate.Arn
+          Id: "ECRReplicateCodeBuild"
+          RoleArn: !GetAtt CWEventInvokeRole.Arn
+          InputTransformer:
+            InputPathsMap: 
+              awsRegion: $.detail.awsRegion
+              repoName: $.detail.responseElements.image.repositoryName
+              registryId: $.detail.responseElements.image.registryId
+              imageTag: $.detail.responseElements.image.imageId.imageTag
+            InputTemplate: |
+              {
+                "environmentVariablesOverride": [
+                  {
+                    "name": "ECR_SRC_REG_ID",
+                    "type": "PLAINTEXT",
+                    "value": <registryId>
+                  },
+                  {
+                    "name": "ECR_SRC_REGION",
+                    "type": "PLAINTEXT",
+                    "value": <awsRegion>
+                  },
+                  {
+                    "name": "ECR_REPO_NAME",
+                    "type": "PLAINTEXT",
+                    "value": <repoName>
+                  },
+                  {
+                    "name": "ECR_REPO_TAG",
+                    "type": "PLAINTEXT",
+                    "value": <imageTag>
+                  }
+                 ]
+              }
