@@ -106,11 +106,12 @@ Resources:
   EventRule:
     Type: AWS::Events::Rule
     Properties: 
-      Description: "ECR PutImage event rule to trigger CodeBuild to replicate repository"
+      Description: "ECR PUSH event rule to trigger CodeBuild to replicate repository"
       EventPattern: 
         source: [aws.ecr]
         detail:
-          eventName: [PutImage]
+          action-type: ["PUSH"]
+          result: ["SUCCESS"]
       State: ENABLED
       Targets: 
         - Arn: !GetAtt CodeBuildECRReplicate.Arn
@@ -118,10 +119,10 @@ Resources:
           RoleArn: !GetAtt CWEventInvokeRole.Arn
           InputTransformer:
             InputPathsMap: 
-              awsRegion: $.detail.awsRegion
-              repoName: $.detail.responseElements.image.repositoryName
-              registryId: $.detail.responseElements.image.registryId
-              imageTag: $.detail.responseElements.image.imageId.imageTag
+              awsRegion: $.region
+              repoName: $.detail.repository-name
+              registryId: $.account
+              imageTag: $.detail.image-tag
             InputTemplate: |
               {
                 "environmentVariablesOverride": [
