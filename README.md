@@ -1,3 +1,5 @@
+!!UPDATE: Please note that Amazon ECR has support [cross-region and cross-account replication](https://aws.amazon.com/about-aws/whats-new/2020/12/amazon-ecr-announces-cross-region-replication-of-images/), the maintainance for this project has been stopped.
+
 # Amazon ECR repositories cross-region replication
 Amazon ECR is a regional service and docker images in one region will not be replicated in other regions automatically. In the scenario of multi-region deployment, you may need to replicate docker images to the region where application deployed due to these reasons:
 1. Cost, reduce cost of data transfer for images
